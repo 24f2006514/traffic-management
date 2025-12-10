@@ -1,0 +1,78 @@
+# ============================
+# GLOBAL
+# ============================
+node_modules/
+.env
+.env.*
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS / Editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build output
+dist/
+build/
+.out/
+.vercel/
+
+# ============================
+# FRONTEND (Vite + React)
+# ============================
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.*
+frontend/*.local
+
+# Vite cache
+frontend/.vite/
+
+# Optional: generated TypeScript cache (if using TS)
+frontend/tsconfig.tsbuildinfo
+
+# ============================
+# BACKEND (Node + Express + Socket.IO)
+# ============================
+backend/node_modules/
+backend/.env
+backend/.env.*
+backend/*.local
+
+# Nodemon debug file
+backend/nodemon-debug.log
+
+# ============================
+# PYTHON YOLO SERVICE
+# ============================
+yolo-service/.venv/
+yolo-service/venv/
+yolo-service/__pycache__/
+yolo-service/*.pyc
+
+# YOLO model weights (DO NOT COMMIT)
+yolo-service/model/*.pt
+yolo-service/model/*.pth
+
+# Videos / heavy data
+yolo-service/videos/
+yolo-service/output/
+*.mp4
+*.avi
+
+# ============================
+# PROJECT-LEVEL
+# ============================
+# Python virtual env if created at project root
+.venv/
+venv/
+
+# Mac
+*.swp
+*.swo

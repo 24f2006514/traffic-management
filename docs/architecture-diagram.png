@@ -1,0 +1,12 @@
+ARCHITECTURE DIAGRAM PLACEHOLDER
+
+This would contain a visual diagram showing:
+- Frontend (React SPA on Vercel)
+- Backend (Node.js/Express on local machine)
+- YOLO Service (Python on local machine)
+- WebSocket connection between frontend and backend
+- REST API calls from frontend to backend
+- Camera/Video input to YOLO service
+- Output: alerts → backend → frontend via WebSocket
+
+For now, see demo-instructions.md for the flow overview.
