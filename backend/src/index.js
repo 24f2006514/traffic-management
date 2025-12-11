@@ -4,6 +4,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const alertsRouter = require('./routes/alerts');
 const trafficRouter = require('./routes/traffic');
+const emergencyRoutesRouter = require('./routes/emergencyRoutes');
 const env = require('./config/env');
 
 const app = express();
@@ -18,6 +19,7 @@ app.set('io', io);
 
 app.use('/alerts', alertsRouter);
 app.use('/traffic', trafficRouter);
+app.use('/emergency-routes', emergencyRoutesRouter);
 
 require('./socket')(io);
 
