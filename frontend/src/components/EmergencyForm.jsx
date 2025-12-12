@@ -8,6 +8,7 @@ import {
   Polyline,
 } from "react-leaflet";
 import { io } from "socket.io-client";
+import { useAuth } from "../contexts/AuthContext";
 import {
   AlertCircle,
   Navigation,
@@ -59,6 +60,7 @@ function Routing({
   onRouteCalculated,
   color = "#ff0000",
   emergencyId = null,
+  shouldFitBounds = true, // Control whether to fit bounds for this route
 }) {
   const map = useMap();
   const [routeCoordinates, setRouteCoordinates] = useState([]);
@@ -78,14 +80,68 @@ function Routing({
       return;
     }
 
-    // Reset fit bounds flag when source/destination changes
-    hasFittedBounds.current = false;
+    // Reset fit bounds flag when source/destination changes OR when shouldFitBounds changes
+    // This allows re-fitting bounds when a route is selected
+    // Note: Route should always be fetched and displayed, regardless of shouldFitBounds
+    if (!shouldFitBounds) {
+      hasFittedBounds.current = true; // Prevent fitting if not selected
+    } else {
+      hasFittedBounds.current = false; // Allow fitting if selected
+    }
 
-    // Fetch route from OSRM
+    // Always fetch route from backend proxy (to avoid CORS issues)
+    // Route will be displayed even if shouldFitBounds is false
     const fetchRoute = async () => {
       try {
-        const url = `https://router.project-osrm.org/route/v1/driving/${source.lng},${source.lat};${destination.lng},${destination.lat}?overview=full&geometries=geojson`;
+        const url = `${API_BASE_URL}/api/route?sourceLng=${source.lng}&sourceLat=${source.lat}&destLng=${destination.lng}&destLat=${destination.lat}`;
         const response = await fetch(url);
+        
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ error: 'Failed to fetch route' }));
+          console.error("Route API error:", errorData);
+          
+          // Show user-friendly error message
+          let errorMessage = errorData.details || errorData.error || 'Failed to calculate route';
+          if (errorData.suggestion) {
+            errorMessage += `. ${errorData.suggestion}`;
+          } else if (response.status === 502 || response.status === 504) {
+            errorMessage += '. Please try again in a few moments or use locations closer together.';
+          }
+          
+          console.warn("Route calculation failed:", errorMessage);
+          
+          // Fallback: Show a straight line between source and destination if API fails
+          // This ensures the route is still visible even if routing service is unavailable
+          const fallbackCoordinates = [
+            [source.lat, source.lng],
+            [destination.lat, destination.lng]
+          ];
+          console.log("Using fallback straight line route");
+          setRouteCoordinates(fallbackCoordinates);
+          
+          // Still call the callback with estimated values
+          if (onRouteCalculated) {
+            // Calculate straight-line distance as fallback
+            const R = 6371; // Earth's radius in km
+            const dLat = (destination.lat - source.lat) * Math.PI / 180;
+            const dLng = (destination.lng - source.lng) * Math.PI / 180;
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                      Math.cos(source.lat * Math.PI / 180) * Math.cos(destination.lat * Math.PI / 180) *
+                      Math.sin(dLng / 2) * Math.sin(dLng / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            const distance = R * c;
+            const estimatedTime = (distance / 50) * 60; // Assume 50 km/h average speed
+            const estimatedAmbulanceTime = estimatedTime / 1.5;
+            
+            onRouteCalculated({
+              distance: distance.toFixed(2),
+              normalTime: estimatedTime.toFixed(1),
+              ambulanceTime: estimatedAmbulanceTime.toFixed(1),
+            }, emergencyId);
+          }
+          return;
+        }
+        
         const data = await response.json();
 
         if (data.code === "Ok" && data.routes && data.routes.length > 0) {
@@ -94,6 +150,13 @@ function Routing({
             coord[1],
             coord[0],
           ]); // Convert [lng, lat] to [lat, lng]
+          
+          console.log(`Route calculated for emergency ${emergencyId || 'driver'}:`, {
+            coordinatesCount: coordinates.length,
+            distance: route.distance / 1000,
+            duration: route.duration / 60
+          });
+          
           setRouteCoordinates(coordinates);
 
           // Calculate distance and time
@@ -113,30 +176,81 @@ function Routing({
           if (onRouteCalculated) {
             onRouteCalculated(routeData, emergencyId);
 
-            // Fit map to route bounds with safety checks
-            if (coordinates.length > 0 && !hasFittedBounds.current) {
+            // Fit map to route bounds with safety checks (only if shouldFitBounds is true)
+            if (shouldFitBounds && coordinates.length > 0 && !hasFittedBounds.current) {
               // Use setTimeout to ensure map is fully rendered
-              setTimeout(() => {
-                try {
-                  // Check if map and map container exist and are initialized
-                  if (map && map._loaded && map.getContainer()) {
-                    const bounds = L.latLngBounds(coordinates);
-                    map.fitBounds(bounds, {
-                      padding: [50, 50],
-                      animate: false, // Disable animation to prevent errors during multiple updates
-                    });
-                    hasFittedBounds.current = true;
+              const fitBoundsWithRetry = (retries = 3) => {
+                setTimeout(() => {
+                  try {
+                    // Check if map and map container exist and are properly initialized
+                    const container = map?.getContainer();
+                    if (
+                      map &&
+                      container &&
+                      map._loaded &&
+                      map._panes &&
+                      map._panes.mapPane &&
+                      container.offsetWidth > 0 &&
+                      container.offsetHeight > 0
+                    ) {
+                      const bounds = L.latLngBounds(coordinates);
+                      // Validate bounds before fitting
+                      if (bounds.isValid()) {
+                        map.fitBounds(bounds, {
+                          padding: [50, 50],
+                          animate: false, // Disable animation to prevent errors during multiple updates
+                        });
+                        hasFittedBounds.current = true;
+                      }
+                    } else if (retries > 0) {
+                      // Retry if map not ready yet
+                      fitBoundsWithRetry(retries - 1);
+                    }
+                  } catch (err) {
+                    if (retries > 0) {
+                      // Retry on error
+                      fitBoundsWithRetry(retries - 1);
+                    } else {
+                      console.warn("Could not fit bounds after retries:", err);
+                      // Non-critical error, map will still display route
+                    }
                   }
-                } catch (err) {
-                  console.warn("Could not fit bounds:", err);
-                  // Non-critical error, map will still display route
-                }
-              }, 100);
+                }, retries === 3 ? 200 : 300); // Initial delay, then longer delays for retries
+              };
+              
+              fitBoundsWithRetry();
             }
           }
         } else {
           console.error("OSRM route error:", data);
-          setRouteCoordinates([]);
+          
+          // Fallback: Show a straight line between source and destination
+          const fallbackCoordinates = [
+            [source.lat, source.lng],
+            [destination.lat, destination.lng]
+          ];
+          console.log("OSRM returned error, using fallback straight line route");
+          setRouteCoordinates(fallbackCoordinates);
+          
+          // Calculate fallback route info
+          if (onRouteCalculated) {
+            const R = 6371; // Earth's radius in km
+            const dLat = (destination.lat - source.lat) * Math.PI / 180;
+            const dLng = (destination.lng - source.lng) * Math.PI / 180;
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                      Math.cos(source.lat * Math.PI / 180) * Math.cos(destination.lat * Math.PI / 180) *
+                      Math.sin(dLng / 2) * Math.sin(dLng / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            const distance = R * c;
+            const estimatedTime = (distance / 50) * 60; // Assume 50 km/h average speed
+            const estimatedAmbulanceTime = estimatedTime / 1.5;
+            
+            onRouteCalculated({
+              distance: distance.toFixed(2),
+              normalTime: estimatedTime.toFixed(1),
+              ambulanceTime: estimatedAmbulanceTime.toFixed(1),
+            }, emergencyId);
+          }
         }
       } catch (error) {
         console.error("Error fetching route:", error);
@@ -149,7 +263,18 @@ function Routing({
     };
 
     fetchRoute();
-  }, [map, source, destination, onRouteCalculated, color, emergencyId]);
+  }, [map, source, destination, onRouteCalculated, color, emergencyId, shouldFitBounds]);
+
+  // Debug: Log when route coordinates are available
+  useEffect(() => {
+    if (routeCoordinates.length > 0) {
+      console.log(`Polyline ready for emergency ${emergencyId || 'driver'}:`, {
+        points: routeCoordinates.length,
+        color,
+        shouldFitBounds
+      });
+    }
+  }, [routeCoordinates.length, emergencyId, color, shouldFitBounds]);
 
   return routeCoordinates.length > 0 ? (
     <Polyline
@@ -168,13 +293,20 @@ function AllEmergencyRoutes({
   selectedId,
   onRouteCalculated,
 }) {
+  // If a route is selected, only show that route. Otherwise, show all routes.
+  const routesToShow = selectedId 
+    ? routes.filter(route => route.id === selectedId)
+    : routes;
+
   return (
     <>
-      {routes.map((route, index) => {
+      {routesToShow.map((route, index) => {
         if (!route.source?.coords || !route.destination?.coords) return null;
 
         const colors = ["#ff0000", "#0066ff", "#00ff00", "#ff00ff", "#ffff00"];
-        const color = colors[index % colors.length];
+        const originalIndex = routes.findIndex(r => r.id === route.id);
+        const color = colors[originalIndex % colors.length];
+        const isSelected = selectedId === route.id;
 
         return (
           <div key={route.id || index}>
@@ -182,7 +314,7 @@ function AllEmergencyRoutes({
               position={[route.source.coords.lat, route.source.coords.lng]}
             >
               <Popup>
-                <strong>Source - Route {index + 1}</strong>
+                <strong>Source - Route {originalIndex + 1}</strong>
                 <br />
                 {route.source.address || route.source.coords.displayName}
                 <br />
@@ -203,7 +335,7 @@ function AllEmergencyRoutes({
               ]}
             >
               <Popup>
-                <strong>Destination - Route {index + 1}</strong>
+                <strong>Destination - Route {originalIndex + 1}</strong>
                 <br />
                 {route.destination.address ||
                   route.destination.coords.displayName}
@@ -221,9 +353,10 @@ function AllEmergencyRoutes({
             <Routing
               source={route.source.coords}
               destination={route.destination.coords}
-              color={selectedId === route.id ? "#fbbf24" : color}
+              color={isSelected ? "#fbbf24" : color}
               onRouteCalculated={onRouteCalculated}
               emergencyId={route.id}
+              shouldFitBounds={isSelected} // Only fit bounds for selected route
             />
           </div>
         );
@@ -271,6 +404,7 @@ const formatFullDateTime = (dateString) => {
 };
 
 function EmergencyForm({ userRole = "driver" }) {
+  const { getAuthHeaders } = useAuth();
   const [formData, setFormData] = useState({
     vehicleType: "ambulance",
     driverName: "",
@@ -297,21 +431,25 @@ function EmergencyForm({ userRole = "driver" }) {
   const [selectedEmergency, setSelectedEmergency] = useState(null);
   const socketRef = useRef(null);
 
-  // Fetch emergency routes from backend
-  const fetchEmergencyRoutes = async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/emergency-routes`);
-      if (response.ok) {
-        const routes = await response.json();
-        setEmergencyRoutes(routes);
-      }
-    } catch (error) {
-      console.error("Error fetching emergency routes:", error);
-    }
-  };
-
   // Initialize WebSocket connection
   useEffect(() => {
+    // Fetch emergency routes from backend (for officers)
+    const fetchEmergencyRoutes = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/emergency-routes`, {
+          headers: getAuthHeaders(),
+        });
+        if (response.ok) {
+          const routes = await response.json();
+          setEmergencyRoutes(routes);
+        } else if (response.status === 401) {
+          console.error("Unauthorized - please login again");
+        }
+      } catch (error) {
+        console.error("Error fetching emergency routes:", error);
+      }
+    };
+
     socketRef.current = io(SOCKET_URL);
 
     // Listen for new emergency routes (for officers)
@@ -325,9 +463,11 @@ function EmergencyForm({ userRole = "driver" }) {
       }
     });
 
-    // Listen for deleted routes
+    // Listen for deleted routes (only for officers)
     socketRef.current.on("emergency_route_deleted", ({ id }) => {
-      setEmergencyRoutes((prev) => prev.filter((r) => r.id !== id));
+      if (userRole === "officer") {
+        setEmergencyRoutes((prev) => prev.filter((r) => r.id !== id));
+      }
     });
 
     // Fetch existing routes for officers
@@ -340,6 +480,7 @@ function EmergencyForm({ userRole = "driver" }) {
         socketRef.current.disconnect();
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userRole]);
 
   // Geocode address to coordinates
@@ -428,9 +569,7 @@ function EmergencyForm({ userRole = "driver" }) {
         try {
           const response = await fetch(`${API_BASE_URL}/emergency-routes`, {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
+            headers: getAuthHeaders(),
             body: JSON.stringify(routeData),
           });
 
@@ -512,6 +651,7 @@ function EmergencyForm({ userRole = "driver" }) {
     try {
       const response = await fetch(`${API_BASE_URL}/emergency-routes/${id}`, {
         method: "DELETE",
+        headers: getAuthHeaders(),
       });
       if (response.ok) {
         setEmergencyRoutes((prev) => prev.filter((e) => e.id !== id));
@@ -817,18 +957,16 @@ function EmergencyForm({ userRole = "driver" }) {
             </div>
           )}
 
-          <div
-            className={`active-emergencies-section ${
-              userRole === "officer" ? "full-width" : ""
-            }`}
-          >
-            <div className="section-header">
-              <Clock className="section-icon" />
-              <h2>Active Emergencies</h2>
-              <span className="active-count">
-                {emergencyRoutes.length} Active
-              </span>
-            </div>
+          {/* Active Emergencies section - Only visible to officers */}
+          {userRole === "officer" && (
+            <div className="active-emergencies-section full-width">
+              <div className="section-header">
+                <Clock className="section-icon" />
+                <h2>Active Emergencies</h2>
+                <span className="active-count">
+                  {emergencyRoutes.length} Active
+                </span>
+              </div>
 
             <div className="emergencies-list">
               {emergencyRoutes.length === 0 ? (
@@ -935,10 +1073,17 @@ function EmergencyForm({ userRole = "driver" }) {
                       {userRole === "officer" && (
                         <div className="emergency-actions">
                           <button
-                            onClick={() => viewEmergencyOnMap(emergency)}
-                            className="view-map-btn"
+                            onClick={() => {
+                              // Toggle selection: if already selected, deselect to show all routes
+                              if (selectedEmergency?.id === emergency.id) {
+                                setSelectedEmergency(null);
+                              } else {
+                                viewEmergencyOnMap(emergency);
+                              }
+                            }}
+                            className={`view-map-btn ${selectedEmergency?.id === emergency.id ? 'active' : ''}`}
                           >
-                            View on Map
+                            {selectedEmergency?.id === emergency.id ? 'Show All Routes' : 'View on Map'}
                           </button>
                           <button
                             onClick={() => clearEmergency(emergency.id)}
@@ -954,6 +1099,7 @@ function EmergencyForm({ userRole = "driver" }) {
               )}
             </div>
           </div>
+          )}
 
           {userRole === "officer" && (
             <div className="map-section full-width">

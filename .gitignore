@@ -76,3 +76,9 @@ venv/
 # Mac
 *.swp
 *.swo
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+backend/traffic_management.db
